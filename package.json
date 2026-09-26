@@ -1,0 +1,80 @@
+{
+  "name": "household-ledger",
+  "version": "0.1.1",
+  "description": "Offline personal household ledger for Windows",
+  "private": true,
+  "type": "module",
+  "main": "out/main/index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cesayct/Household-Ledger.git"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "test:database": "tsx scripts/test-database.ts",
+    "test:ocr": "tsx scripts/test-ocr.ts",
+    "test:packaged-ocr": "tsx scripts/test-packaged-ocr.ts",
+    "dist": "npm run build && electron-builder --win nsis --publish never",
+    "release": "npm run build && electron-builder --win nsis --publish always"
+  },
+  "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "@tesseract.js-data/jpn": "^1.0.0",
+    "chart.js": "^4.5.1",
+    "electron-updater": "^6.8.9",
+    "sql.js": "^1.14.2",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/sql.js": "^1.4.11",
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6"
+  },
+  "build": {
+    "appId": "jp.local.householdledger",
+    "productName": "Household Ledger",
+    "electronUpdaterCompatibility": ">= 2.16",
+    "directories": {
+      "output": "dist/auto-update"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Cesayct",
+      "repo": "Household-Ledger",
+      "releaseType": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/sql.js/dist/sql-wasm.wasm",
+      "node_modules/tesseract.js/**",
+      "node_modules/tesseract.js-core/**",
+      "node_modules/@tesseract.js-data/jpn/**",
+      "node_modules/@tesseract.js-data/eng/**",
+      "node_modules/bmp-js/**",
+      "node_modules/idb-keyval/**",
+      "node_modules/is-url/**",
+      "node_modules/node-fetch/**",
+      "node_modules/opencollective-postinstall/**",
+      "node_modules/regenerator-runtime/**",
+      "node_modules/tr46/**",
+      "node_modules/wasm-feature-detect/**",
+      "node_modules/webidl-conversions/**",
+      "node_modules/whatwg-url/**",
+      "node_modules/zlibjs/**"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

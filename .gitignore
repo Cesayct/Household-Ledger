@@ -1,0 +1,8 @@
+node_modules/
+out/
+dist/
+tmp/
+graphify-out/
+*.log
+*.traineddata
+.DS_Store
