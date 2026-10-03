@@ -10,6 +10,7 @@ import {
 } from "../shared/date";
 import type {
   Category,
+  CategoryBudgetSetting,
   DashboardData,
   Expense,
   ExpenseInput,
@@ -34,7 +35,10 @@ type ExpenseDraft = {
 const yen = (amount: number): string => `¥${Math.round(amount).toLocaleString("ja-JP")}`;
 const number = (amount: number): string => Math.round(amount).toLocaleString("ja-JP");
 const formatBudgetInput = (amount: number | null): string => amount == null ? "" : amount.toLocaleString("en-US");
-const parseBudgetInput = (value: string): number | null => value.trim() === "" ? null : Number(value.replaceAll(",", ""));
+const parseBudgetInput = (value: string): number | null => {
+  const normalized = value.trim();
+  return normalized === "" || normalized === "-" ? null : Number(normalized.replaceAll(",", ""));
+};
 const percentage = (value: number): string => `${value.toFixed(value >= 10 ? 0 : 1)}%`;
 const weekday = (date: string): string => ["日", "月", "火", "水", "木", "金", "土"][parseDateKey(date).getDay()];
 
@@ -71,7 +75,7 @@ export class HouseholdLedgerApp {
   private categories: Category[] = [];
   private paymentMethods: PaymentMethod[] = [];
   private monthlyBudgets: MonthlyBudget[] = [];
-  private commonBudget: number | null = null;
+  private categoryBudgets: CategoryBudgetSetting[] = [];
   private charts: Chart[] = [];
   private ocrImage: ReceiptImage | null = null;
   private ocrResult: OcrResult | null = null;
@@ -143,8 +147,9 @@ export class HouseholdLedgerApp {
     const currentPosition = input.selectionStart ?? currentValue.length;
     const digitsBeforeCursor = currentValue.slice(0, currentPosition).replace(/\D/g, "").length;
     const digits = currentValue.replace(/\D/g, "").slice(0, 10);
-    const formatted = digits ? Number(digits).toLocaleString("en-US") : "";
-    let nextPosition = 0;
+    const hasLeadingMinus = input.hasAttribute("data-budget-adjustment") && /^\s*-/.test(currentValue);
+    const formatted = digits ? `${hasLeadingMinus ? "-" : ""}${Number(digits).toLocaleString("en-US")}` : (hasLeadingMinus ? "-" : "");
+    let nextPosition = hasLeadingMinus ? 1 : 0;
     let digitCount = 0;
     while (nextPosition < formatted.length && digitCount < digitsBeforeCursor) {
       if (/\d/.test(formatted[nextPosition])) digitCount += 1;
@@ -152,6 +157,7 @@ export class HouseholdLedgerApp {
     }
     input.value = formatted;
     input.setSelectionRange(nextPosition, nextPosition);
+    this.updateBudgetTotals();
   }
 
   private async handleClick(event: Event): Promise<void> {
@@ -167,6 +173,19 @@ export class HouseholdLedgerApp {
     if (!actionElement) return;
     const action = actionElement.dataset.action;
     switch (action) {
+      case "add-month-budget-row": {
+        const month = Number(actionElement.dataset.month);
+        const container = this.content.querySelector<HTMLElement>(`[data-month-additions-container="${month}"]`);
+        if (container) {
+          container.insertAdjacentHTML("beforeend", this.monthlyBudgetAdditionRow(month));
+          this.updateBudgetTotals();
+        }
+        break;
+      }
+      case "remove-month-budget-row":
+        actionElement.closest<HTMLElement>(".monthly-budget-row")?.remove();
+        this.updateBudgetTotals();
+        break;
       case "today":
         this.selectedDate = todayKey();
         this.selectedWeekStart = getWeekStart(this.selectedDate);
@@ -245,6 +264,9 @@ export class HouseholdLedgerApp {
 
   private async handleChange(event: Event): Promise<void> {
     const input = event.target as HTMLInputElement;
+    if (input.closest(".monthly-budget-row")) {
+      this.updateBudgetTotals();
+    }
     if (input.id === "dashboard-date" && input.value) {
       this.selectedDate = input.value;
       this.selectedWeekStart = getWeekStart(input.value);
@@ -281,7 +303,7 @@ export class HouseholdLedgerApp {
         await this.createPaymentMethod(form);
         break;
       case "budget-settings-form":
-        await this.saveMonthlyBudgets(form);
+        await this.saveBudgetSettings(form);
         break;
       case "ocr-expense-form":
         await this.submitOcrExpense(form);
@@ -756,19 +778,57 @@ export class HouseholdLedgerApp {
 
   private async renderSettings(): Promise<void> {
     await this.loadReferenceData(true);
-    [this.monthlyBudgets, this.commonBudget] = await Promise.all([
-      window.ledgerApi.budgets.list(),
-      window.ledgerApi.budgets.common()
-    ]);
+    const budgetSettings = await window.ledgerApi.budgets.settings();
+    this.monthlyBudgets = budgetSettings.monthlyBudgets;
+    this.categoryBudgets = budgetSettings.categoryBudgets;
+    const categoryAmounts = new Map(this.categoryBudgets.map((budget) => [budget.categoryId, budget.amount ?? 0]));
+    const commonTotal = [...categoryAmounts.values()].reduce((sum, amount) => sum + amount, 0);
     this.content.innerHTML = `
       <section class="page-intro"><div><p class="eyebrow">PREFERENCES</p><h2>設定</h2><p>カテゴリ、支払い方法、データの入出力を管理します。</p></div></section>
       <section class="settings-grid">
         <article class="card settings-card"><div class="card-heading"><div><p class="eyebrow">CATEGORIES</p><h3>カテゴリ管理</h3></div></div><form id="category-create-form" class="inline-create"><input name="name" type="text" placeholder="新しいカテゴリ名" required /><input name="color" type="color" value="#4361ee" title="カテゴリ色" /><button class="button primary" type="submit">追加</button></form><div class="settings-list">${this.categories.map((category, index) => this.categorySettingRow(category, index)).join("")}</div></article>
         <article class="card settings-card"><div class="card-heading"><div><p class="eyebrow">PAYMENT METHODS</p><h3>支払い方法</h3></div></div><form id="payment-create-form" class="inline-create"><input name="name" type="text" placeholder="新しい支払い方法" required /><button class="button primary" type="submit">追加</button></form><div class="settings-list">${this.paymentMethods.map((method) => this.paymentSettingRow(method)).join("")}</div></article>
       </section>
-      <section class="card budget-settings-card"><div class="card-heading"><div><p class="eyebrow">MONTHLY BUDGETS</p><h3>予算設定</h3><p class="settings-description">月別予算が未設定の月には、共通予算が適用されます。月別予算は毎年同じ月に適用されます。</p></div></div><form id="budget-settings-form" class="budget-settings-form"><div class="common-budget-row"><label class="budget-field"><span>共通予算</span><div class="input-with-suffix"><input name="budget-common" data-budget-amount type="text" inputmode="numeric" maxlength="13" autocomplete="off" value="${formatBudgetInput(this.commonBudget)}" placeholder="未設定" /><em>円</em></div></label><small>各月に個別の予算がない場合、この金額を参照します。</small></div><div class="budget-input-grid">${this.monthlyBudgets.map((budget) => `<label class="budget-field"><span>${budget.month}月</span><div class="input-with-suffix"><input name="budget-${budget.month}" data-budget-amount type="text" inputmode="numeric" maxlength="13" autocomplete="off" value="${formatBudgetInput(budget.amount)}" placeholder="共通予算を使用" /><em>円</em></div><input class="budget-memo-input" name="memo-${budget.month}" type="text" maxlength="100" aria-label="${budget.month}月の補足メモ" value="${escapeHtml(budget.memo)}" placeholder="補足メモ（1行）" /></label>`).join("")}</div><div class="budget-form-footer"><small>月別予算は空欄または0円で共通予算を参照します。メモだけの保存もできます。</small><button class="button primary" type="submit">予算を保存</button></div></form></section>
+      <section class="card budget-settings-card">
+        <div class="card-heading"><div><p class="eyebrow">BUDGET SETTINGS</p><h3>予算設定</h3><p class="settings-description">カテゴリごとに共通予算を設定します。各月にはカテゴリを指定して追加予算と補足メモを登録できます。</p></div></div>
+        <form id="budget-settings-form" class="budget-settings-form">
+          <section class="common-category-budget">
+            <div class="budget-section-heading"><div><h4>カテゴリ別共通予算</h4><p>各月の共通予算は、ここで設定した金額の合計です。</p></div><strong>共通予算合計 <span id="common-budget-total">${yen(commonTotal)}</span></strong></div>
+            <div class="category-budget-grid">${this.categories.map((category) => {
+              const amount = categoryAmounts.get(category.id) ?? 0;
+              return `<label class="category-budget-field${category.isActive ? "" : " disabled"}"><span>${escapeHtml(category.name)}${category.isActive ? "" : "（無効）"}</span><div class="input-with-suffix"><input data-budget-amount data-category-common data-category-id="${category.id}" type="text" inputmode="numeric" maxlength="13" autocomplete="off" value="${amount ? formatBudgetInput(amount) : ""}" placeholder="未設定" /><em>円</em></div></label>`;
+            }).join("")}</div>
+          </section>
+          <section class="monthly-budget-settings">
+            <div class="budget-section-heading"><div><h4>月ごとの追加予算</h4><p>追加予算は指定したカテゴリの共通予算に加算され、その月の予算合計にも反映されます。</p></div></div>
+            <div class="monthly-budget-grid">${this.monthlyBudgets.map((budget) => {
+              const additionsTotal = budget.additions.reduce((sum, addition) => sum + addition.amount, 0);
+              return `<article class="month-budget-card" data-month-budget-card data-month="${budget.month}">
+                <header class="month-budget-heading"><div><h4>${budget.month}月</h4><span>共通 <strong data-month-common-total>${yen(commonTotal)}</strong></span></div><button class="button outline small-button" type="button" data-action="add-month-budget-row" data-month="${budget.month}">＋ 追加予算設定</button></header>
+                <div class="month-budget-summary"><span>追加分</span><strong data-month-additions-total>${yen(additionsTotal)}</strong><span>月合計</span><strong data-month-total>${yen(commonTotal + additionsTotal)}</strong></div>
+                <div class="monthly-budget-rows" data-month-additions-container="${budget.month}">${budget.additions.map((addition) => this.monthlyBudgetAdditionRow(budget.month, addition)).join("")}</div>
+              </article>`;
+            }).join("")}</div>
+          </section>
+          <div class="budget-form-footer"><small>金額は保存時にカンマ付きで入力できます。補足メモは各追加予算に付けられます。</small><button class="button primary" type="submit">予算を保存</button></div>
+        </form>
+      </section>
       <section class="card backup-card"><div class="backup-copy"><p class="eyebrow">DATA SAFETY</p><h3>バックアップと復元</h3><p>家計簿データをJSONでバックアップ、CSVで出力できます。復元すると現在のデータは上書きされます。</p></div><div class="backup-actions"><button class="button outline" data-action="export-json">JSONバックアップ</button><button class="button outline" data-action="export-csv">CSV出力</button><button class="button danger-outline" data-action="restore-json">JSONから復元</button></div></section>
     `;
+  }
+
+  private monthlyBudgetAdditionRow(month: number, addition?: MonthlyBudget["additions"][number]): string {
+    const categories = this.categories.map((category) =>
+      `<option value="${category.id}"${selected(addition?.categoryId === category.id)}>${escapeHtml(category.name)}${category.isActive ? "" : "（無効）"}</option>`
+    ).join("");
+    const amount = addition ? formatBudgetInput(addition.amount) : "";
+    const memo = addition?.memo ?? "";
+    return `<div class="monthly-budget-row">
+      <label class="monthly-budget-category"><span>カテゴリ</span><select class="monthly-budget-category-select" aria-label="${month}月の追加予算カテゴリ"><option value="">選択してください</option>${categories}</select></label>
+      <label class="monthly-budget-amount"><span>金額</span><div class="input-with-suffix"><input data-budget-amount data-budget-adjustment type="text" inputmode="numeric" maxlength="14" autocomplete="off" value="${amount}" placeholder="0" /><em>円</em></div></label>
+      <label class="monthly-budget-memo"><span>補足メモ</span><input class="budget-memo-input" type="text" maxlength="100" value="${escapeHtml(memo)}" placeholder="任意" /></label>
+      <button class="icon-button remove-budget-row" type="button" data-action="remove-month-budget-row" aria-label="${month}月の追加予算を削除">削除</button>
+    </div>`;
   }
 
   private categorySettingRow(category: Category, index: number): string {
@@ -802,33 +862,63 @@ export class HouseholdLedgerApp {
     }
   }
 
-  private async saveMonthlyBudgets(form: HTMLFormElement): Promise<void> {
+  private async saveBudgetSettings(form: HTMLFormElement): Promise<void> {
     try {
-      const commonInput = form.elements.namedItem("budget-common") as HTMLInputElement | null;
-      const commonRaw = commonInput?.value.trim() ?? "";
-      const commonAmount = parseBudgetInput(commonRaw);
-      const monthUpdates = this.monthlyBudgets.map((budget) => {
-        const input = form.elements.namedItem(`budget-${budget.month}`) as HTMLInputElement | null;
-        const memoInput = form.elements.namedItem(`memo-${budget.month}`) as HTMLInputElement | null;
-        return {
-          month: budget.month,
-          amount: parseBudgetInput(input?.value ?? ""),
-          memo: memoInput?.value ?? ""
-        };
-      });
-      const enteredAmounts = [commonAmount, ...monthUpdates.map((budget) => budget.amount)];
-      if (enteredAmounts.some((amount) => amount != null && (!Number.isSafeInteger(amount) || amount < 0 || amount > 1_000_000_000))) {
-        throw new Error("予算は0円以上10億円以下の整数で入力してください。");
+      const categoryBudgets = this.categories.map((category) => ({
+        categoryId: category.id,
+        amount: parseBudgetInput(form.querySelector<HTMLInputElement>(`[data-category-common][data-category-id="${category.id}"]`)?.value ?? "")
+      }));
+      if (categoryBudgets.some(({ amount }) => amount != null && (!Number.isSafeInteger(amount) || amount < 0 || amount > 1_000_000_000))) {
+        throw new Error("カテゴリ共通予算は0円以上10億円以下の整数で入力してください。");
       }
-      await Promise.all([
-        window.ledgerApi.budgets.updateCommon(commonAmount),
-        ...monthUpdates.map((budget) => window.ledgerApi.budgets.update(budget.month, budget.amount, budget.memo))
-      ]);
-      this.showToast("共通予算・月別予算・補足メモを保存しました", "success");
+
+      const monthlyBudgets = this.monthlyBudgets.map(({ month }) => {
+        const rows = [...form.querySelectorAll<HTMLElement>(`[data-month-additions-container="${month}"] .monthly-budget-row`)];
+        const additions = rows.flatMap((row) => {
+          const select = row.querySelector<HTMLSelectElement>(".monthly-budget-category-select");
+          const amountInput = row.querySelector<HTMLInputElement>("[data-budget-adjustment]");
+          const memoInput = row.querySelector<HTMLInputElement>(".budget-memo-input");
+          const amount = parseBudgetInput(amountInput?.value ?? "");
+          const memo = memoInput?.value ?? "";
+          if (amount == null && !memo.trim() && !select?.value) return [];
+          if (!select?.value) throw new Error(`${month}月の追加予算にカテゴリを選択してください。`);
+          if (amount == null) throw new Error(`${month}月の追加予算に金額を入力してください。`);
+          if (!Number.isSafeInteger(amount) || Math.abs(amount) > 1_000_000_000) {
+            throw new Error("追加予算は±10億円以内の整数で入力してください。");
+          }
+          if (memo.length > 100) throw new Error("補足メモは100文字以内で入力してください。");
+          return [{ categoryId: Number(select.value), amount, memo }];
+        });
+        return { month, additions };
+      });
+
+      await window.ledgerApi.budgets.saveSettings({ categoryBudgets, monthlyBudgets });
+      this.showToast("カテゴリ別・月別の予算を保存しました", "success");
       await this.renderCurrent();
     } catch (error) {
       this.showToast(this.errorMessage(error), "error");
     }
+  }
+
+  private updateBudgetTotals(): void {
+    const categoryInputs = [...this.content.querySelectorAll<HTMLInputElement>("[data-category-common]")];
+    const amountByCategory = new Map(categoryInputs.map((input) => [Number(input.dataset.categoryId), parseBudgetInput(input.value) ?? 0]));
+    const commonTotal = [...amountByCategory.values()].reduce((sum, amount) => sum + amount, 0);
+    const commonTotalElement = this.content.querySelector<HTMLElement>("#common-budget-total");
+    if (commonTotalElement) commonTotalElement.textContent = yen(commonTotal);
+
+    this.content.querySelectorAll<HTMLElement>("[data-month-budget-card]").forEach((card) => {
+      const month = Number(card.dataset.month);
+      const additionsTotal = [...card.querySelectorAll<HTMLInputElement>("[data-budget-adjustment]")]
+        .reduce((sum, input) => sum + (parseBudgetInput(input.value) ?? 0), 0);
+      const monthCommonTotal = card.querySelector<HTMLElement>("[data-month-common-total]");
+      const monthAdditionsTotal = card.querySelector<HTMLElement>("[data-month-additions-total]");
+      const monthTotal = card.querySelector<HTMLElement>("[data-month-total]");
+      if (monthCommonTotal) monthCommonTotal.textContent = yen(commonTotal);
+      if (monthAdditionsTotal) monthAdditionsTotal.textContent = yen(additionsTotal);
+      if (monthTotal) monthTotal.textContent = yen(commonTotal + additionsTotal);
+      card.dataset.month = String(month);
+    });
   }
 
   private async moveCategory(id: number, offset: number): Promise<void> {

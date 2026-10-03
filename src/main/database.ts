@@ -12,12 +12,17 @@ import {
 } from "../shared/date";
 import type {
   BackupSnapshot,
+  BudgetSettings,
+  BudgetSettingsInput,
+  CategoryBudgetSetting,
   Category,
   CategoryAmount,
   DashboardData,
   Expense,
   ExpenseInput,
+  LegacyBackupSnapshot,
   MonthView,
+  MonthlyBudgetAddition,
   MonthlyBudget,
   PaymentMethod,
   RestoreResult,
@@ -33,6 +38,12 @@ import {
 import { dirname, extname, join, resolve, sep } from "node:path";
 
 type SqlParam = string | number | null;
+
+type LegacyMonthlyBudget = {
+  month: number;
+  amount: number | null;
+  memo: string;
+};
 
 const DEFAULT_CATEGORIES = [
   ["食費", "#e76f51"],
@@ -96,6 +107,7 @@ export class HouseholdDatabase {
     this.database.run("PRAGMA foreign_keys = ON;");
     this.createSchema();
     this.seedDefaults();
+    this.migrateLegacyBudgetSettings();
     this.persist();
   }
 
@@ -132,6 +144,31 @@ export class HouseholdDatabase {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         amount INTEGER NOT NULL CHECK (amount > 0),
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS category_budgets (
+        category_id INTEGER PRIMARY KEY,
+        amount INTEGER NOT NULL CHECK (amount BETWEEN 1 AND 1000000000),
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (category_id) REFERENCES categories(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS monthly_budget_additions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+        category_id INTEGER NOT NULL,
+        amount INTEGER NOT NULL CHECK (amount BETWEEN -1000000000 AND 1000000000),
+        memo TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (category_id) REFERENCES categories(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_monthly_budget_additions_month
+        ON monthly_budget_additions(month, id);
+
+      CREATE TABLE IF NOT EXISTS budget_settings_migrations (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        migrated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS expenses (
@@ -356,7 +393,173 @@ export class HouseholdDatabase {
     }
   }
 
-  listMonthlyBudgets(): MonthlyBudget[] {
+  private migrateLegacyBudgetSettings(): void {
+    if (this.scalar("SELECT COUNT(*) AS count FROM budget_settings_migrations WHERE id = 1") > 0) return;
+
+    this.transaction(() => {
+      const newBudgetRows =
+        this.scalar("SELECT COUNT(*) AS count FROM category_budgets") +
+        this.scalar("SELECT COUNT(*) AS count FROM monthly_budget_additions");
+      if (newBudgetRows === 0) {
+        const oldCommon = this.query<Record<string, unknown>>(
+          "SELECT amount FROM common_budgets WHERE id = 1"
+        )[0];
+        const oldMonthly = this.query<Record<string, unknown>>(
+          "SELECT month, amount FROM monthly_budgets ORDER BY month"
+        );
+        const oldMemos = this.query<Record<string, unknown>>(
+          "SELECT month, memo FROM monthly_budget_memos ORDER BY month"
+        );
+        const commonAmount = oldCommon ? toNumber(oldCommon.amount) : 0;
+        const hasLegacySettings = commonAmount > 0 || oldMonthly.length > 0 || oldMemos.length > 0;
+        const fallbackCategory = hasLegacySettings
+          ? this.listCategories(true).find((category) => category.name === "その他") ?? this.listCategories(true)[0]
+          : undefined;
+
+        if (hasLegacySettings && !fallbackCategory) {
+          throw new Error("旧予算を移行するカテゴリがありません。");
+        }
+
+        if (fallbackCategory && commonAmount > 0) {
+          this.run(
+            "INSERT INTO category_budgets (category_id, amount, updated_at) VALUES (?, ?, ?)",
+            [fallbackCategory.id, commonAmount, nowIso()]
+          );
+        }
+
+        if (fallbackCategory) {
+          const amountByMonth = new Map(oldMonthly.map((row) => [toNumber(row.month), toNumber(row.amount)]));
+          const memoByMonth = new Map(oldMemos.map((row) => [toNumber(row.month), String(row.memo ?? "")]));
+          const legacyMonths = new Set([...amountByMonth.keys(), ...memoByMonth.keys()]);
+          for (const month of legacyMonths) {
+            const oldAmount = amountByMonth.get(month);
+            const adjustment = oldAmount == null ? 0 : oldAmount - commonAmount;
+            const memo = (memoByMonth.get(month) ?? "").replace(/[\r\n\t]+/g, " ").trim();
+            if (adjustment !== 0 || memo) {
+              this.run(
+                `INSERT INTO monthly_budget_additions (month, category_id, amount, memo, updated_at)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [month, fallbackCategory.id, adjustment, memo || "旧月別予算から移行", nowIso()]
+              );
+            }
+          }
+        }
+      }
+
+      this.run("INSERT INTO budget_settings_migrations (id, migrated_at) VALUES (1, ?)", [nowIso()]);
+    });
+  }
+
+  listCommonCategoryBudgets(): CategoryBudgetSetting[] {
+    const amounts = new Map(
+      this.query<Record<string, unknown>>("SELECT category_id, amount FROM category_budgets")
+        .map((row) => [toNumber(row.category_id), toNumber(row.amount)])
+    );
+    return this.listCategories(true).map((category) => ({
+      categoryId: category.id,
+      amount: amounts.get(category.id) ?? null
+    }));
+  }
+
+  listMonthlyBudgetSettings(): MonthlyBudget[] {
+    const rows = this.query<Record<string, unknown>>(
+      `SELECT b.id, b.month, b.category_id, c.name AS category_name, b.amount, b.memo
+       FROM monthly_budget_additions b
+       JOIN categories c ON c.id = b.category_id
+       ORDER BY b.month, b.id`
+    );
+    const additionsByMonth = new Map<number, MonthlyBudgetAddition[]>();
+    rows.forEach((row) => {
+      const month = toNumber(row.month);
+      const additions = additionsByMonth.get(month) ?? [];
+      additions.push({
+        id: toNumber(row.id),
+        categoryId: toNumber(row.category_id),
+        categoryName: String(row.category_name),
+        amount: toNumber(row.amount),
+        memo: String(row.memo ?? "")
+      });
+      additionsByMonth.set(month, additions);
+    });
+    return Array.from({ length: 12 }, (_, index) => ({
+      month: index + 1,
+      additions: additionsByMonth.get(index + 1) ?? []
+    }));
+  }
+
+  getBudgetSettings(): BudgetSettings {
+    return {
+      categoryBudgets: this.listCommonCategoryBudgets(),
+      monthlyBudgets: this.listMonthlyBudgetSettings()
+    };
+  }
+
+  saveBudgetSettings(settings: BudgetSettingsInput): void {
+    if (!settings || !Array.isArray(settings.categoryBudgets) || !Array.isArray(settings.monthlyBudgets)) {
+      throw new Error("Budget settings are invalid.");
+    }
+    const categoryIds = new Set(this.listCategories(true).map((category) => category.id));
+    const seenCategoryBudgets = new Set<number>();
+    settings.categoryBudgets.forEach((budget) => {
+      if (!Number.isInteger(budget.categoryId) || !categoryIds.has(budget.categoryId) || seenCategoryBudgets.has(budget.categoryId)) {
+        throw new Error("共通予算のカテゴリ設定が正しくありません。");
+      }
+      if (budget.amount != null && (!Number.isSafeInteger(budget.amount) || budget.amount < 0 || budget.amount > 1_000_000_000)) {
+        throw new Error("カテゴリ共通予算は0円以上、1,000,000,000円以下の整数で入力してください。");
+      }
+      seenCategoryBudgets.add(budget.categoryId);
+    });
+
+    const seenMonths = new Set<number>();
+    settings.monthlyBudgets.forEach((budget) => {
+      if (!Number.isInteger(budget.month) || budget.month < 1 || budget.month > 12 || seenMonths.has(budget.month)) {
+        throw new Error("月別予算の月指定が正しくありません。");
+      }
+      if (!Array.isArray(budget.additions)) throw new Error("月別追加予算の形式が正しくありません。");
+      budget.additions.forEach((addition) => {
+        if (!Number.isInteger(addition.categoryId) || !categoryIds.has(addition.categoryId)) {
+          throw new Error("月別追加予算のカテゴリを選択してください。");
+        }
+        if (!Number.isSafeInteger(addition.amount) || Math.abs(addition.amount) > 1_000_000_000) {
+          throw new Error("月別予算の金額は±1,000,000,000円以内の整数で入力してください。");
+        }
+        if (typeof addition.memo !== "string" || addition.memo.length > 100) {
+          throw new Error("月別予算の補足メモは100文字以内で入力してください。");
+        }
+      });
+      seenMonths.add(budget.month);
+    });
+    if (seenCategoryBudgets.size !== categoryIds.size || seenMonths.size !== 12) {
+      throw new Error("すべてのカテゴリと1月から12月までの設定を送信してください。");
+    }
+
+    this.transaction(() => {
+      this.run("DELETE FROM category_budgets");
+      this.run("DELETE FROM monthly_budget_additions");
+      settings.categoryBudgets.forEach((budget) => {
+        if (budget.amount != null && budget.amount > 0) {
+          this.run(
+            "INSERT INTO category_budgets (category_id, amount, updated_at) VALUES (?, ?, ?)",
+            [budget.categoryId, budget.amount, nowIso()]
+          );
+        }
+      });
+      settings.monthlyBudgets.forEach((budget) => {
+        budget.additions.forEach((addition) => {
+          const memo = addition.memo.replace(/[\r\n\t]+/g, " ").trim();
+          if (addition.amount !== 0 || memo) {
+            this.run(
+              `INSERT INTO monthly_budget_additions (month, category_id, amount, memo, updated_at)
+               VALUES (?, ?, ?, ?, ?)`,
+              [budget.month, addition.categoryId, addition.amount, memo, nowIso()]
+            );
+          }
+        });
+      });
+    });
+  }
+
+  listMonthlyBudgets(): LegacyMonthlyBudget[] {
     const rows = this.query<Record<string, unknown>>(
       "SELECT month, amount FROM monthly_budgets ORDER BY month"
     );
@@ -372,7 +575,7 @@ export class HouseholdDatabase {
     }));
   }
 
-  updateMonthlyBudget(month: number, amount: number | null, memo = ""): MonthlyBudget {
+  updateMonthlyBudget(month: number, amount: number | null, memo = ""): LegacyMonthlyBudget {
     if (!Number.isInteger(month) || month < 1 || month > 12) {
       throw new Error("予算の月が正しくありません。");
     }
@@ -406,10 +609,8 @@ export class HouseholdDatabase {
   }
 
   getCommonBudget(): number | null {
-    const row = this.query<Record<string, unknown>>(
-      "SELECT amount FROM common_budgets WHERE id = 1"
-    )[0];
-    return row ? toNumber(row.amount) : null;
+    const amount = this.scalar("SELECT COALESCE(SUM(amount), 0) AS count FROM category_budgets");
+    return amount > 0 ? amount : null;
   }
 
   updateCommonBudget(amount: number | null): number | null {
@@ -430,7 +631,7 @@ export class HouseholdDatabase {
     });
   }
 
-  private monthlyBudgetForMonth(month: string): { amount: number | null; memo: string } {
+  private legacyMonthlyBudgetForMonth(month: string): { amount: number | null; memo: string } {
     const monthNumber = Number(month.slice(5, 7));
     if (!Number.isInteger(monthNumber) || monthNumber < 1 || monthNumber > 12) {
       return { amount: null, memo: "" };
@@ -445,6 +646,25 @@ export class HouseholdDatabase {
     return {
       amount: monthAmount != null && monthAmount > 0 ? monthAmount : this.getCommonBudget(),
       memo: String(row?.memo ?? "")
+    };
+  }
+
+  private monthlyBudgetForMonth(month: string): { amount: number | null; memo: string } {
+    const monthNumber = Number(month.slice(5, 7));
+    if (!Number.isInteger(monthNumber) || monthNumber < 1 || monthNumber > 12) {
+      return { amount: null, memo: "" };
+    }
+    const additions = this.query<Record<string, unknown>>(
+      `SELECT SUM(CASE WHEN amount <> 0 THEN 1 ELSE 0 END) AS count, COALESCE(SUM(amount), 0) AS amount
+       FROM monthly_budget_additions WHERE month = ?`,
+      [monthNumber]
+    )[0];
+    const commonBudget = this.getCommonBudget();
+    const hasAdditions = toNumber(additions?.count) > 0;
+    if (commonBudget == null && !hasAdditions) return { amount: null, memo: "" };
+    return {
+      amount: (commonBudget ?? 0) + toNumber(additions?.amount),
+      memo: ""
     };
   }
 
@@ -694,10 +914,18 @@ export class HouseholdDatabase {
   private backupSnapshot(): BackupSnapshot {
     const categories = this.listCategories(true);
     const paymentMethods = this.listPaymentMethods(true);
-    const monthlyBudgets = this.listMonthlyBudgets()
-      .filter((budget) => budget.amount != null || budget.memo.length > 0)
-      .map((budget) => ({ month: budget.month, amount: budget.amount, memo: budget.memo }));
-    const commonBudget = this.getCommonBudget();
+    const budgetSettings = this.getBudgetSettings();
+    const categoryBudgets = budgetSettings.categoryBudgets
+      .filter((budget): budget is CategoryBudgetSetting & { amount: number } => budget.amount != null)
+      .map((budget) => ({ categoryId: budget.categoryId, amount: budget.amount }));
+    const monthlyBudgetAdditions = budgetSettings.monthlyBudgets.flatMap((budget) =>
+      budget.additions.map(({ categoryId, amount, memo }) => ({
+        month: budget.month,
+        categoryId,
+        amount,
+        memo
+      }))
+    );
     const rows = this.query<Record<string, unknown>>(
       `SELECT id, spent_date, amount, category_id, payment_method_id, memo, receipt_image_path, created_at, updated_at
        FROM expenses ORDER BY spent_date, id`
@@ -724,12 +952,12 @@ export class HouseholdDatabase {
     });
     return {
       format: "household-ledger-backup",
-      version: 1,
+      version: 2,
       exportedAt: nowIso(),
       categories,
       paymentMethods,
-      monthlyBudgets,
-      commonBudget,
+      categoryBudgets,
+      monthlyBudgetAdditions,
       expenses
     };
   }
@@ -766,12 +994,17 @@ export class HouseholdDatabase {
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new Error("JSONの形式が正しくありません。");
+      throw new Error("JSONバックアップの形式が正しくありません。");
     }
-    const snapshot = parsed as Partial<BackupSnapshot>;
+    const snapshot = parsed as Partial<BackupSnapshot> & Partial<LegacyBackupSnapshot>;
+    const isCurrentVersion = snapshot.version === 2 &&
+      Array.isArray(snapshot.categoryBudgets) &&
+      Array.isArray(snapshot.monthlyBudgetAdditions);
+    const isLegacyVersion = snapshot.version === 1 &&
+      (snapshot.monthlyBudgets == null || Array.isArray(snapshot.monthlyBudgets));
     if (
       snapshot.format !== "household-ledger-backup" ||
-      snapshot.version !== 1 ||
+      (!isCurrentVersion && !isLegacyVersion) ||
       !Array.isArray(snapshot.categories) ||
       !Array.isArray(snapshot.paymentMethods) ||
       !Array.isArray(snapshot.expenses)
@@ -781,11 +1014,80 @@ export class HouseholdDatabase {
 
     const categories = snapshot.categories as BackupSnapshot["categories"];
     const paymentMethods = snapshot.paymentMethods as BackupSnapshot["paymentMethods"];
-    const monthlyBudgets = (snapshot.monthlyBudgets ?? []) as NonNullable<BackupSnapshot["monthlyBudgets"]>;
-    const commonBudget = snapshot.commonBudget ?? null;
     const expenses = snapshot.expenses as BackupSnapshot["expenses"];
     const categoryIds = new Set(categories.map((category) => category.id));
     const paymentMethodIds = new Set(paymentMethods.map((method) => method.id));
+    const categoryBudgets: Array<{ categoryId: number; amount: number }> = [];
+    const monthlyBudgetAdditions: Array<{ month: number; categoryId: number; amount: number; memo: string }> = [];
+
+    if (isCurrentVersion) {
+      categoryBudgets.push(...(snapshot.categoryBudgets as BackupSnapshot["categoryBudgets"]));
+      monthlyBudgetAdditions.push(...(snapshot.monthlyBudgetAdditions as BackupSnapshot["monthlyBudgetAdditions"]));
+    } else {
+      const legacy = snapshot as unknown as LegacyBackupSnapshot;
+      const commonBudget = legacy.commonBudget ?? null;
+      if (commonBudget != null && (!Number.isSafeInteger(commonBudget) || commonBudget < 0 || commonBudget > 1_000_000_000)) {
+        throw new Error("バックアップ内の共通予算データが不正です。");
+      }
+      const legacyMonths = legacy.monthlyBudgets ?? [];
+      legacyMonths.forEach((budget) => {
+        if (
+          !Number.isInteger(budget.month) || budget.month < 1 || budget.month > 12 ||
+          (budget.amount != null && (!Number.isSafeInteger(budget.amount) || budget.amount < 0 || budget.amount > 1_000_000_000)) ||
+          (budget.memo != null && (typeof budget.memo !== "string" || budget.memo.length > 100))
+        ) {
+          throw new Error("バックアップ内の月別予算データが不正です。");
+        }
+      });
+      const hasLegacyBudget = (commonBudget ?? 0) > 0 ||
+        legacyMonths.some((budget) => (budget.amount ?? 0) > 0 || Boolean(budget.memo?.trim()));
+      if (hasLegacyBudget) {
+        const fallbackCategory = categories.find((category) => category.name === "その他") ?? categories[0];
+        if (!fallbackCategory) throw new Error("予算を移行できるカテゴリがありません。");
+        if ((commonBudget ?? 0) > 0) {
+          categoryBudgets.push({ categoryId: fallbackCategory.id, amount: commonBudget! });
+        }
+        legacyMonths.forEach((budget) => {
+          const adjustment = budget.amount == null || budget.amount === 0
+            ? 0
+            : budget.amount - (commonBudget ?? 0);
+          const memo = String(budget.memo ?? "").replace(/[\r\n\t]+/g, " ").trim();
+          if (adjustment !== 0 || memo) {
+            monthlyBudgetAdditions.push({
+              month: budget.month,
+              categoryId: fallbackCategory.id,
+              amount: adjustment,
+              memo: memo || "旧月別予算から移行"
+            });
+          }
+        });
+      }
+    }
+
+    const seenCategoryBudgets = new Set<number>();
+    categoryBudgets.forEach((budget) => {
+      if (
+        !Number.isInteger(budget.categoryId) ||
+        !categoryIds.has(budget.categoryId) ||
+        seenCategoryBudgets.has(budget.categoryId) ||
+        !Number.isSafeInteger(budget.amount) ||
+        budget.amount < 1 ||
+        budget.amount > 1_000_000_000
+      ) {
+        throw new Error("バックアップ内のカテゴリ別共通予算データが不正です。");
+      }
+      seenCategoryBudgets.add(budget.categoryId);
+    });
+    monthlyBudgetAdditions.forEach((addition) => {
+      if (
+        !Number.isInteger(addition.month) || addition.month < 1 || addition.month > 12 ||
+        !Number.isInteger(addition.categoryId) || !categoryIds.has(addition.categoryId) ||
+        !Number.isSafeInteger(addition.amount) || Math.abs(addition.amount) > 1_000_000_000 ||
+        typeof addition.memo !== "string" || addition.memo.length > 100
+      ) {
+        throw new Error("バックアップ内の月別追加予算データが不正です。");
+      }
+    });
     expenses.forEach((expense) => {
       if (!categoryIds.has(expense.categoryId) || (expense.paymentMethodId != null && !paymentMethodIds.has(expense.paymentMethodId))) {
         throw new Error("バックアップ内のカテゴリまたは支払い方法が不正です。");
@@ -794,26 +1096,16 @@ export class HouseholdDatabase {
         throw new Error("バックアップ内の支出データが不正です。");
       }
     });
-    monthlyBudgets.forEach((budget) => {
-      if (
-        !Number.isInteger(budget.month) || budget.month < 1 || budget.month > 12 ||
-        (budget.amount != null && (!Number.isInteger(budget.amount) || budget.amount < 0 || budget.amount > 1_000_000_000)) ||
-        (budget.memo != null && (typeof budget.memo !== "string" || budget.memo.length > 100))
-      ) {
-        throw new Error("バックアップ内の月別予算データが不正です。");
-      }
-    });
-    if (commonBudget != null && (!Number.isInteger(commonBudget) || commonBudget < 0 || commonBudget > 1_000_000_000)) {
-      throw new Error("バックアップ内の共通予算データが不正です。");
-    }
 
     return this.transaction(() => {
       this.run("DELETE FROM expenses");
-      this.run("DELETE FROM categories");
-      this.run("DELETE FROM payment_methods");
+      this.run("DELETE FROM monthly_budget_additions");
+      this.run("DELETE FROM category_budgets");
       this.run("DELETE FROM monthly_budgets");
       this.run("DELETE FROM monthly_budget_memos");
       this.run("DELETE FROM common_budgets");
+      this.run("DELETE FROM categories");
+      this.run("DELETE FROM payment_methods");
       categories.forEach((category) => {
         this.run(
           "INSERT INTO categories (id, name, color, sort_order, is_active) VALUES (?, ?, ?, ?, ?)",
@@ -826,27 +1118,20 @@ export class HouseholdDatabase {
           [method.id, method.name, method.sortOrder, method.isActive ? 1 : 0]
         );
       });
-      monthlyBudgets.forEach((budget) => {
-        if (budget.amount != null && budget.amount > 0) {
-          this.run(
-            "INSERT INTO monthly_budgets (month, amount, updated_at) VALUES (?, ?, ?)",
-            [budget.month, budget.amount, nowIso()]
-          );
-        }
-        const memo = String(budget.memo ?? "").replace(/[\r\n\t]+/g, " ").trim();
-        if (memo) {
-          this.run(
-            "INSERT INTO monthly_budget_memos (month, memo, updated_at) VALUES (?, ?, ?)",
-            [budget.month, memo, nowIso()]
-          );
-        }
-      });
-      if (commonBudget != null && commonBudget > 0) {
+      categoryBudgets.forEach((budget) => {
         this.run(
-          "INSERT INTO common_budgets (id, amount, updated_at) VALUES (1, ?, ?)",
-          [commonBudget, nowIso()]
+          "INSERT INTO category_budgets (category_id, amount, updated_at) VALUES (?, ?, ?)",
+          [budget.categoryId, budget.amount, nowIso()]
         );
-      }
+      });
+      monthlyBudgetAdditions.forEach((addition) => {
+        const memo = addition.memo.replace(/[\r\n\t]+/g, " ").trim();
+        this.run(
+          `INSERT INTO monthly_budget_additions (month, category_id, amount, memo, updated_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [addition.month, addition.categoryId, addition.amount, memo, nowIso()]
+        );
+      });
       expenses.forEach((expense) => {
         this.run(
           `INSERT INTO expenses (id, spent_date, amount, category_id, payment_method_id, memo, created_at, updated_at)
@@ -879,8 +1164,7 @@ export class HouseholdDatabase {
         categories: categories.length,
         paymentMethods: paymentMethods.length,
         expenses: expenses.length,
-        budgets: monthlyBudgets.filter((budget) => budget.amount != null && budget.amount > 0).length +
-          (commonBudget != null && commonBudget > 0 ? 1 : 0)
+        budgets: categoryBudgets.length + monthlyBudgetAdditions.length
       };
     });
   }
