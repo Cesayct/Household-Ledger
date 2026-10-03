@@ -29,6 +29,6 @@ The setup installer and unpacked app are written under `dist/auto-update/`.
 
 ## Publish a release
 
-Update the version in `package.json` and `package-lock.json`, then either push a matching `v<version>` tag (for example `v0.1.2`) or run **Build and publish Windows release** manually from GitHub Actions. The workflow builds and tests the NSIS app, then publishes the installer, blockmap, and `latest.yml` to a public GitHub Release. Installed copies use those files to check for updates.
+Update the version in `package.json` and `package-lock.json`, then either push a matching `v<version>` tag (for example `v0.1.3`) or run **Build and publish Windows release** manually from GitHub Actions. The workflow builds and tests the NSIS app, then publishes the installer, blockmap, and `latest.yml` to a public GitHub Release. Installed copies use those files to check for updates.
 
 Never commit `tmp/`, `dist/`, `out/`, or `graphify-out/`; these are local data, generated files, or build outputs.

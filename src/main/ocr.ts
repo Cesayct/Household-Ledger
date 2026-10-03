@@ -28,14 +28,18 @@ const normalizedDigits = (value: string): string => value
   .replace(/[八]/g, "8")
   .replace(/[九]/g, "9");
 
-const parseDate = (text: string): string | null => {
-  const normalized = normalizeOcrText(text);
-  const full = normalized.match(/(20\d{2})\s*[./年-]\s*(\d{1,2})\s*[./月-]\s*(\d{1,2})日?/);
-  if (full) return `${full[1]}-${full[2].padStart(2, "0")}-${full[3].padStart(2, "0")}`;
-  const short = normalized.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
-  if (short) {
-    const year = new Date().getFullYear();
-    return `${year}-${short[1].padStart(2, "0")}-${short[2].padStart(2, "0")}`;
+export const parseDate = (text: string): string | null => {
+  const normalized = normalizedDigits(normalizeOcrText(text));
+  for (const line of normalized.split("\n")) {
+    // OCR may insert spaces inside a date, e.g. "2026 年 10 月 0 1 日".
+    const compact = line.replace(/\s+/g, "");
+    const full = compact.match(/(20\d{2})[./年-](\d{1,2})[./月-](\d{1,2})日?/u);
+    if (full) return `${full[1]}-${full[2].padStart(2, "0")}-${full[3].padStart(2, "0")}`;
+    const short = compact.match(/(\d{1,2})月(\d{1,2})日/u);
+    if (short) {
+      const year = new Date().getFullYear();
+      return `${year}-${short[1].padStart(2, "0")}-${short[2].padStart(2, "0")}`;
+    }
   }
 
   // Separators are often lost on narrow or low-contrast receipts. Only accept
@@ -57,7 +61,7 @@ const parseDate = (text: string): string | null => {
   return null;
 };
 
-const parseAmounts = (text: string): number[] => {
+export const parseAmounts = (text: string): number[] => {
   const normalized = normalizeOcrText(text);
   const candidates = new Map<number, number>();
   const add = (value: string, priority: number) => {
@@ -78,9 +82,22 @@ const parseAmounts = (text: string): number[] => {
       const match = pattern.exec(line);
       if (!match || match.index === undefined) continue;
       const tail = line.slice(match.index + match[0].length);
-      const digits = normalizedDigits(tail).replace(/[^0-9]/g, "");
-      if (digits) add(digits, priority);
+      const compactTail = normalizedDigits(tail).replace(/(?<=\d)\s+(?=\d)/gu, "");
+      const amount = compactTail.match(/(?:[¥￥#]\s*)?(\d{1,3}(?:,\d{3})+|\d{1,8})(?!\d)/u);
+      if (amount) add(amount[1], priority);
       break;
+    }
+
+    // The leading character of "合計" is often misread. Accept an isolated
+    // "計" with a following amount, but never confuse "小計" for the grand total.
+    if (!/小\s*計/u.test(line) && /(?<![一-龠ぁ-んァ-ヶ])計(?![一-龠ぁ-んァ-ヶ])/u.test(line)) {
+      const label = /(?<![一-龠ぁ-んァ-ヶ])計(?![一-龠ぁ-んァ-ヶ])/u.exec(line);
+      if (label?.index !== undefined) {
+        const tail = line.slice(label.index + label[0].length);
+        const compactTail = normalizedDigits(tail).replace(/(?<=\d)\s+(?=\d)/gu, "");
+        const amount = compactTail.match(/(?:[¥￥#]\s*)?(\d{1,3}(?:,\d{3})+|\d{1,8})(?!\d)/u);
+        if (amount) add(amount[1], 95);
+      }
     }
   }
 
@@ -88,7 +105,8 @@ const parseAmounts = (text: string): number[] => {
   // labeled totals ahead of item prices, change, and phone/date numbers.
   for (const line of normalized.split("\n")) {
     if (!/[¥円]/u.test(line)) continue;
-    for (const match of normalizedDigits(line).matchAll(/(?<!\d)(\d{1,3}(?:,\d{3})+|\d{2,8})(?!\d)/g)) {
+    const compactDigits = normalizedDigits(line).replace(/(?<=\d)\s+(?=\d)/gu, "");
+    for (const match of compactDigits.matchAll(/(?<!\d)(\d{1,3}(?:,\d{3})+|\d{2,8})(?!\d)/gu)) {
       add(match[1], 10);
     }
   }

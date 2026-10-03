@@ -4,6 +4,7 @@ export type Category = {
   color: string;
   sortOrder: number;
   isActive: boolean;
+  excludeFromWeeklyBudget: boolean;
 };
 
 export type PaymentMethod = {
@@ -50,6 +51,20 @@ export type BudgetSettingsInput = {
   }>;
 };
 
+export type BudgetYearSnapshot = {
+  year: number;
+  categoryBudgets: Array<{
+    categoryId: number;
+    amount: number;
+  }>;
+  monthlyBudgetAdditions: Array<{
+    month: number;
+    categoryId: number;
+    amount: number;
+    memo: string;
+  }>;
+};
+
 export type Expense = {
   id: number;
   spentDate: string;
@@ -82,6 +97,17 @@ export type CategoryAmount = {
   percentage: number;
 };
 
+export type MonthlyCategoryAmount = CategoryAmount & {
+  budget: number | null;
+};
+
+export type CategoryBudgetSummary = {
+  categoryId: number;
+  categoryName: string;
+  color: string;
+  amount: number;
+};
+
 export type DailyAmount = {
   date: string;
   label: string;
@@ -93,6 +119,9 @@ export type WeekAmount = {
   weekEnd: string;
   label: string;
   amount: number;
+  budget: number | null;
+  overspend: number;
+  remaining: number;
 };
 
 export type DashboardData = {
@@ -105,6 +134,7 @@ export type DashboardData = {
   monthlyDifference: number | null;
   monthlyAverage: number;
   monthDaysElapsed: number;
+  categoryBudgets: CategoryBudgetSummary[];
   categoryAmounts: CategoryAmount[];
   dailyAmounts: DailyAmount[];
   recentExpenses: Expense[];
@@ -130,7 +160,8 @@ export type MonthView = {
   monthlyBudget: number | null;
   monthlyBudgetMemo: string;
   monthlyDifference: number | null;
-  categoryAmounts: CategoryAmount[];
+  categoryBudgets: CategoryBudgetSummary[];
+  categoryAmounts: MonthlyCategoryAmount[];
   weekAmounts: WeekAmount[];
   expenses: Expense[];
 };
@@ -149,6 +180,11 @@ export type ReceiptImage = {
   dataUrl: string;
 };
 
+export type ReceiptTransferSession = {
+  url: string;
+  expiresAt: number;
+};
+
 export type RestoreResult = {
   categories: number;
   paymentMethods: number;
@@ -165,6 +201,7 @@ type BackupSnapshotBase = {
     color: string;
     sortOrder: number;
     isActive: boolean;
+    excludeFromWeeklyBudget?: boolean;
   }>;
   paymentMethods: Array<{
     id: number;
@@ -189,6 +226,22 @@ type BackupSnapshotBase = {
 };
 
 export type BackupSnapshot = BackupSnapshotBase & {
+  version: 3;
+  activeBudgetYear: number;
+  budgetSettingsByYear: BudgetYearSnapshot[];
+  categoryBudgets: Array<{
+    categoryId: number;
+    amount: number;
+  }>;
+  monthlyBudgetAdditions: Array<{
+    month: number;
+    categoryId: number;
+    amount: number;
+    memo: string;
+  }>;
+};
+
+export type PreviousBackupSnapshot = BackupSnapshotBase & {
   version: 2;
   categoryBudgets: Array<{
     categoryId: number;
@@ -223,7 +276,13 @@ export type HouseholdLedgerApi = {
   categories: {
     list: (includeInactive?: boolean) => Promise<Category[]>;
     create: (input: { name: string; color: string }) => Promise<Category>;
-    update: (id: number, input: { name: string; color: string; isActive: boolean }) => Promise<Category>;
+    update: (id: number, input: {
+      name: string;
+      color: string;
+      isActive: boolean;
+      excludeFromWeeklyBudget?: boolean;
+    }) => Promise<Category>;
+    delete: (id: number) => Promise<void>;
     reorder: (ids: number[]) => Promise<Category[]>;
   };
   paymentMethods: {
@@ -245,6 +304,9 @@ export type HouseholdLedgerApi = {
   receipt: {
     chooseImage: () => Promise<ReceiptImage | null>;
     recognize: (dataUrl: string) => Promise<OcrResult>;
+    startMobileTransfer: () => Promise<ReceiptTransferSession>;
+    stopMobileTransfer: () => Promise<void>;
+    onMobileImage: (callback: (image: ReceiptImage) => void) => () => void;
   };
   printing: {
     print: () => Promise<boolean>;

@@ -1,4 +1,5 @@
 import Chart from "chart.js/auto";
+import * as QRCode from "qrcode";
 import {
   addDays,
   formatDateJa,
@@ -19,10 +20,15 @@ import type {
   OcrResult,
   PaymentMethod,
   ReceiptImage,
+  ReceiptTransferSession,
   WeekView
 } from "../shared/types";
 
 type View = "dashboard" | "expense" | "weekly" | "monthly" | "ocr" | "settings";
+
+type MobileTransferView = ReceiptTransferSession & {
+  qrDataUrl: string;
+};
 
 type ExpenseDraft = {
   spentDate: string;
@@ -79,6 +85,9 @@ export class HouseholdLedgerApp {
   private charts: Chart[] = [];
   private ocrImage: ReceiptImage | null = null;
   private ocrResult: OcrResult | null = null;
+  private mobileTransfer: MobileTransferView | null = null;
+  private mobileTransferTimer: number | null = null;
+  private mobileTransferStarting = false;
 
   constructor(root: HTMLDivElement) {
     this.root = root;
@@ -87,6 +96,7 @@ export class HouseholdLedgerApp {
     this.pageTitle = this.root.querySelector<HTMLElement>("#page-title")!;
     this.navButtons = this.root.querySelectorAll<HTMLButtonElement>("[data-view]");
     this.bindEvents();
+    window.ledgerApi.receipt.onMobileImage((image) => void this.receiveMobileReceipt(image));
     void this.renderCurrent();
   }
 
@@ -136,6 +146,7 @@ export class HouseholdLedgerApp {
     this.root.addEventListener("click", (event) => void this.handleClick(event));
     this.root.addEventListener("input", (event) => this.handleInput(event));
     this.root.addEventListener("change", (event) => void this.handleChange(event));
+    this.root.addEventListener("keydown", (event) => this.handleBudgetCategoryPickerKeydown(event));
     this.root.addEventListener("submit", (event) => void this.handleSubmit(event));
   }
 
@@ -162,6 +173,7 @@ export class HouseholdLedgerApp {
 
   private async handleClick(event: Event): Promise<void> {
     const target = event.target as HTMLElement;
+    if (!target.closest(".monthly-budget-select-wrap")) this.closeBudgetCategoryPickers();
     const viewButton = target.closest<HTMLElement>("[data-view]");
     if (viewButton) {
       const view = viewButton.dataset.view as View;
@@ -173,6 +185,20 @@ export class HouseholdLedgerApp {
     if (!actionElement) return;
     const action = actionElement.dataset.action;
     switch (action) {
+      case "toggle-budget-category-picker":
+        this.toggleBudgetCategoryPicker(actionElement);
+        break;
+      case "select-budget-category": {
+        const picker = actionElement.closest<HTMLElement>(".monthly-budget-select-wrap");
+        const select = picker?.querySelector<HTMLSelectElement>(".monthly-budget-category-select");
+        if (picker && select) {
+          select.value = actionElement.dataset.categoryId ?? "";
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+          this.closeBudgetCategoryPickers();
+          picker.querySelector<HTMLButtonElement>(".category-picker-trigger")?.focus();
+        }
+        break;
+      }
       case "add-month-budget-row": {
         const month = Number(actionElement.dataset.month);
         const container = this.content.querySelector<HTMLElement>(`[data-month-additions-container="${month}"]`);
@@ -240,6 +266,12 @@ export class HouseholdLedgerApp {
       case "choose-receipt":
         await this.chooseReceipt();
         break;
+      case "start-mobile-transfer":
+        await this.startMobileReceiptTransfer();
+        break;
+      case "cancel-mobile-transfer":
+        await this.cancelMobileReceiptTransfer();
+        break;
       case "run-ocr":
         await this.runOcr();
         break;
@@ -262,8 +294,86 @@ export class HouseholdLedgerApp {
     }
   }
 
+  private toggleBudgetCategoryPicker(trigger: HTMLElement): void {
+    const picker = trigger.closest<HTMLElement>(".monthly-budget-select-wrap");
+    if (!picker) return;
+    const shouldOpen = !picker.classList.contains("is-open");
+    this.closeBudgetCategoryPickers();
+    if (!shouldOpen) return;
+
+    picker.classList.add("is-open");
+    trigger.setAttribute("aria-expanded", "true");
+    const options = picker.querySelector<HTMLElement>(".category-picker-options");
+    if (options) options.hidden = false;
+  }
+
+  private closeBudgetCategoryPickers(): void {
+    this.content.querySelectorAll<HTMLElement>(".monthly-budget-select-wrap.is-open").forEach((picker) => {
+      picker.classList.remove("is-open");
+      const trigger = picker.querySelector<HTMLButtonElement>(".category-picker-trigger");
+      const options = picker.querySelector<HTMLElement>(".category-picker-options");
+      trigger?.setAttribute("aria-expanded", "false");
+      if (options) options.hidden = true;
+    });
+  }
+
+  private syncBudgetCategoryPicker(select: HTMLSelectElement): void {
+    const picker = select.closest<HTMLElement>(".monthly-budget-select-wrap");
+    if (!picker) return;
+    const selectedCategory = this.categories.find((category) => category.id === Number(select.value));
+    const dot = picker.querySelector<HTMLElement>("[data-category-picker-selected-dot]");
+    const label = picker.querySelector<HTMLElement>("[data-category-picker-label]");
+    if (dot) {
+      dot.hidden = !selectedCategory;
+      if (selectedCategory) dot.style.backgroundColor = selectedCategory.color;
+    }
+    if (label) {
+      label.textContent = selectedCategory
+        ? `${selectedCategory.name}${selectedCategory.isActive ? "" : "（無効）"}`
+        : "選択してください";
+    }
+    picker.querySelectorAll<HTMLButtonElement>("[data-category-picker-option]").forEach((option) => {
+      option.setAttribute("aria-pressed", String(option.dataset.categoryId === select.value));
+    });
+  }
+
+  private handleBudgetCategoryPickerKeydown(event: KeyboardEvent): void {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const picker = target.closest<HTMLElement>(".monthly-budget-select-wrap");
+    if (!picker) return;
+
+    if (event.key === "Escape" && picker.classList.contains("is-open")) {
+      event.preventDefault();
+      this.closeBudgetCategoryPickers();
+      picker.querySelector<HTMLButtonElement>(".category-picker-trigger")?.focus();
+      return;
+    }
+
+    if (target.matches(".category-picker-trigger") && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      if (!picker.classList.contains("is-open")) this.toggleBudgetCategoryPicker(target);
+      const options = [...picker.querySelectorAll<HTMLButtonElement>(".category-picker-option")];
+      const selected = options.find((option) => option.getAttribute("aria-pressed") === "true");
+      (selected ?? options[event.key === "ArrowDown" ? 0 : options.length - 1])?.focus();
+      return;
+    }
+
+    if (target.matches(".category-picker-option") && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      const options = [...picker.querySelectorAll<HTMLButtonElement>(".category-picker-option")];
+      const currentIndex = options.indexOf(target as HTMLButtonElement);
+      if (currentIndex < 0 || options.length === 0) return;
+      event.preventDefault();
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      options[(currentIndex + offset + options.length) % options.length].focus();
+    }
+  }
+
   private async handleChange(event: Event): Promise<void> {
-    const input = event.target as HTMLInputElement;
+    const input = event.target as HTMLInputElement | HTMLSelectElement;
+    if (input instanceof HTMLSelectElement && input.classList.contains("monthly-budget-category-select")) {
+      this.syncBudgetCategoryPicker(input);
+    }
     if (input.closest(".monthly-budget-row")) {
       this.updateBudgetTotals();
     }
@@ -351,6 +461,7 @@ export class HouseholdLedgerApp {
           await this.renderSettings();
           break;
       }
+      if (this.activeView === "ocr") this.decorateOcrPage();
     } catch (error) {
       this.content.innerHTML = `<div class="error-panel"><strong>読み込みに失敗しました</strong><p>${escapeHtml(this.errorMessage(error))}</p><button class="button outline" data-action="today">再試行</button></div>`;
     }
@@ -375,7 +486,7 @@ export class HouseholdLedgerApp {
         ${this.statCard("今月の支出", data.monthTotal, formatMonthJa(monthKey(this.selectedDate)), "orange")}
         ${this.statCard("今月の1日平均", data.monthlyAverage, `${data.monthDaysElapsed}日経過`, "green", true)}
       </section>
-      ${this.budgetComparisonMarkup(formatMonthJa(monthKey(this.selectedDate)), data.monthTotal, data.monthlyBudget, data.monthlyBudgetMemo)}
+      ${this.budgetComparisonMarkup(formatMonthJa(monthKey(this.selectedDate)), data.monthTotal, data.monthlyBudget, data.monthlyBudgetMemo, data.categoryBudgets)}
       <section class="dashboard-grid">
         <article class="card chart-card wide-card">
           <div class="card-heading"><div><p class="eyebrow">DAILY TREND</p><h3>日別の支出</h3></div><span class="muted-label">${escapeHtml(formatMonthJa(monthKey(this.selectedDate)))}</span></div>
@@ -410,7 +521,13 @@ export class HouseholdLedgerApp {
     return `<div class="report-actions"><button class="button outline small" data-action="print-view">印刷</button><button class="button outline small" data-action="export-view-pdf">PDF保存</button></div>`;
   }
 
-  private budgetComparisonMarkup(monthLabel: string, actual: number, budget: number | null, memo: string): string {
+  private budgetComparisonMarkup(
+    monthLabel: string,
+    actual: number,
+    budget: number | null,
+    memo: string,
+    categoryBudgets: MonthView["categoryBudgets"] = []
+  ): string {
     const difference = budget == null ? null : budget - actual;
     const isOver = difference != null && difference < 0;
     const usage = budget && budget > 0 ? Math.min(100, Math.round((actual / budget) * 100)) : 0;
@@ -420,6 +537,7 @@ export class HouseholdLedgerApp {
       <section class="card budget-card${isOver ? " is-over" : difference != null ? " is-under" : " is-unset"}">
         <div class="budget-heading"><div><p class="eyebrow">MONTHLY BUDGET</p><h3>${escapeHtml(monthLabel)}の予算と実績</h3><small>月別予算が未設定の場合は共通予算を適用します。</small></div><span class="budget-status">${differenceLabel}</span></div>
         <div class="budget-metrics"><div><span>予算</span><strong>${budget == null ? "未設定" : yen(budget)}</strong></div><div><span>実績</span><strong>${yen(actual)}</strong></div><div><span>${differenceLabel}</span><strong>${differenceAmount}</strong></div></div>
+        ${categoryBudgets.length ? `<div class="budget-category-breakdown"><h4>カテゴリ別予算設定</h4><div class="budget-category-list">${categoryBudgets.map((item) => `<div><span><i aria-hidden="true" style="background:${escapeHtml(item.color)}"></i>${escapeHtml(item.categoryName)}</span><strong>${yen(item.amount)}</strong></div>`).join("")}</div></div>` : ""}
         ${budget == null ? `<p class="budget-note">共通予算と月別予算が未設定です。</p>` : `<div class="budget-progress"><div><span>予算消化率</span><strong>${usage}%</strong></div><div class="budget-progress-track"><i style="width:${usage}%"></i></div></div>`}
         ${memo.trim() ? `<p class="budget-note budget-memo"><strong>補足：</strong>${escapeHtml(memo)}</p>` : ""}
       </section>
@@ -436,6 +554,24 @@ export class HouseholdLedgerApp {
         `
       )
       .join("")}</div>`;
+  }
+
+  private monthlyCategoryLegend(amounts: MonthView["categoryAmounts"]): string {
+    if (!amounts.length) return "";
+    return `<div class="legend-list monthly-legend-list">
+      <div class="monthly-legend-heading"><span>カテゴリ</span><span>実費 / カテゴリー予算</span><span>割合</span></div>
+      ${amounts
+        .slice(0, 6)
+        .map(
+          (item) => `
+            <div class="legend-row monthly-legend-row">
+              <span class="legend-name"><i style="background:${escapeHtml(item.color)}"></i>${escapeHtml(item.categoryName)}</span>
+              <strong>${yen(item.amount)} / <span class="monthly-category-budget">${item.budget == null ? "未設定" : yen(item.budget)}</span></strong>
+              <small>${percentage(item.percentage)}</small>
+            </div>
+          `
+        )
+        .join("")}</div>`;
   }
 
   private renderDailyChart(data: DashboardData): void {
@@ -603,8 +739,8 @@ export class HouseholdLedgerApp {
     this.content.innerHTML = `
       <section class="page-intro compact-intro"><div><p class="eyebrow">MONTHLY REVIEW</p><h2>${escapeHtml(formatMonthJa(data.month))}</h2></div><div class="page-tools"><div class="period-tools"><button class="icon-nav" data-action="previous-month" aria-label="前月">‹</button><input id="month-picker" class="month-input" type="month" value="${data.month}" /><button class="icon-nav" data-action="next-month" aria-label="次月">›</button></div>${this.reportActions()}</div></section>
       <div class="summary-strip"><div><span>月間合計</span><strong>${yen(data.total)}</strong></div><div><span>登録件数</span><strong>${data.expenses.length}<small>件</small></strong></div><div><span>カテゴリ数</span><strong>${data.categoryAmounts.length}<small>項目</small></strong></div></div>
-      ${this.budgetComparisonMarkup(formatMonthJa(data.month), data.total, data.monthlyBudget, data.monthlyBudgetMemo)}
-      <section class="dashboard-grid monthly-top"><article class="card chart-card category-card"><div class="card-heading"><div><p class="eyebrow">BY CATEGORY</p><h3>カテゴリ別の割合</h3></div></div>${data.categoryAmounts.length ? '<div class="chart-wrap doughnut-wrap"><canvas id="month-category-chart"></canvas></div>' : emptyState("この月の支出はありません", "◌")}${this.categoryLegend(data.categoryAmounts)}</article><article class="card chart-card wide-card"><div class="card-heading"><div><p class="eyebrow">WEEKLY TOTALS</p><h3>週ごとの合計</h3></div></div><div class="chart-wrap line-chart-wrap"><canvas id="week-chart"></canvas></div></article></section>
+      ${this.budgetComparisonMarkup(formatMonthJa(data.month), data.total, data.monthlyBudget, data.monthlyBudgetMemo, data.categoryBudgets)}
+      <section class="dashboard-grid monthly-top"><article class="card chart-card category-card"><div class="card-heading"><div><p class="eyebrow">BY CATEGORY</p><h3>カテゴリ別の割合</h3></div></div>${data.categoryAmounts.length ? '<div class="chart-wrap doughnut-wrap"><canvas id="month-category-chart"></canvas></div>' : emptyState("この月の支出はありません", "◌")}${this.monthlyCategoryLegend(data.categoryAmounts)}</article><article class="card chart-card wide-card"><div class="card-heading"><div><p class="eyebrow">WEEKLY TOTALS</p><h3>週ごとの合計</h3></div></div><div class="chart-wrap line-chart-wrap"><canvas id="week-chart"></canvas></div></article></section>
       <section class="card recent-card"><div class="card-heading"><div><p class="eyebrow">MONTH DETAIL</p><h3>支出明細</h3></div></div>${this.expenseTable(data.expenses)}</section>
     `;
     if (data.categoryAmounts.length) this.renderMonthCategoryChart(data);
@@ -620,7 +756,103 @@ export class HouseholdLedgerApp {
   private renderWeekChart(data: MonthView): void {
     const canvas = this.content.querySelector<HTMLCanvasElement>("#week-chart");
     if (!canvas) return;
-    this.charts.push(new Chart(canvas, { type: "bar", data: { labels: data.weekAmounts.map((item) => item.label), datasets: [{ data: data.weekAmounts.map((item) => item.amount), backgroundColor: "rgba(67, 97, 238, .72)", borderRadius: 6, maxBarThickness: 46 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => ` ${yen(Number(context.raw))}` } } }, scales: { x: { grid: { display: false }, ticks: { color: "#8b94a7" } }, y: { beginAtZero: true, grid: { color: "#eef1f6" }, ticks: { color: "#8b94a7", callback: (value) => yen(Number(value)) } } } } }));
+    const tooltipColors: Record<number, string> = {
+      0: "#9299a6",
+      1: "#4361ee",
+      2: "#dc5964",
+      3: "#202633"
+    };
+
+    this.charts.push(
+      new Chart(canvas, {
+        type: "bar",
+        data: {
+          labels: data.weekAmounts.map((item) => item.label),
+          datasets: [
+            {
+              label: "予算",
+              data: data.weekAmounts.map((item) => item.budget ?? 0),
+              stack: "budget",
+              grouped: false,
+              order: 0,
+              backgroundColor: "rgba(130, 139, 153, .3)",
+              borderColor: "rgba(130, 139, 153, .45)",
+              borderWidth: 1,
+              borderRadius: 6,
+              maxBarThickness: 46
+            },
+            {
+              label: "実費",
+              data: data.weekAmounts.map((item) => item.budget == null ? item.amount : Math.min(item.amount, item.budget)),
+              stack: "actual",
+              grouped: false,
+              order: 1,
+              backgroundColor: "rgba(67, 97, 238, .72)",
+              borderRadius: 6,
+              maxBarThickness: 46
+            },
+            {
+              label: "超過額",
+              data: data.weekAmounts.map((item) => item.overspend),
+              stack: "actual",
+              grouped: false,
+              order: 2,
+              backgroundColor: "#dc5964",
+              borderRadius: 6,
+              maxBarThickness: 46
+            },
+            {
+              label: "余り",
+              data: data.weekAmounts.map((item) => item.remaining),
+              stack: "remaining",
+              grouped: false,
+              order: 3,
+              backgroundColor: "rgba(32, 38, 51, 0)",
+              borderColor: "rgba(32, 38, 51, 0)",
+              borderWidth: 0,
+              maxBarThickness: 46
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              mode: "index",
+              intersect: false,
+              filter: (context) => {
+                const week = data.weekAmounts[context.dataIndex];
+                if (context.datasetIndex === 0) return week.budget != null;
+                if (context.datasetIndex === 2) return week.overspend > 0;
+                if (context.datasetIndex === 3) return week.remaining > 0;
+                return true;
+              },
+              callbacks: {
+                label: (context) => {
+                  const week = data.weekAmounts[context.dataIndex];
+                  switch (context.datasetIndex) {
+                    case 0: return ` 予算：${yen(week.budget ?? 0)}`;
+                    case 1: return ` 実費：${yen(week.amount)}`;
+                    case 2: return ` 超過額：${yen(week.overspend)}`;
+                    default: return ` 余り：${yen(week.remaining)}`;
+                  }
+                },
+                labelColor: (context) => {
+                  const color = tooltipColors[context.datasetIndex] ?? "#202633";
+                  return { borderColor: color, backgroundColor: color, borderWidth: 0 };
+                }
+              }
+            }
+          },
+          scales: {
+            x: { stacked: true, grid: { display: false }, ticks: { color: "#8b94a7" } },
+            y: { beginAtZero: true, stacked: true, grid: { color: "#eef1f6" }, ticks: { color: "#8b94a7", callback: (value) => yen(Number(value)) } }
+          }
+        }
+      })
+    );
   }
 
   private async renderOcr(): Promise<void> {
@@ -643,6 +875,87 @@ export class HouseholdLedgerApp {
     `;
   }
 
+  private decorateOcrPage(): void {
+    const uploadCard = this.content.querySelector<HTMLElement>(".ocr-upload-card");
+    uploadCard?.querySelector<HTMLElement>(".card-heading")?.insertAdjacentHTML(
+      "beforeend",
+      '<button class="button outline small" data-action="start-mobile-transfer">スマホから受信</button>'
+    );
+    if (this.mobileTransfer) uploadCard?.insertAdjacentHTML("beforeend", this.mobileTransferMarkup());
+  }
+
+  private mobileTransferMarkup(): string {
+    const transfer = this.mobileTransfer;
+    if (!transfer) return "";
+    const expiresAt = new Date(transfer.expiresAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+    return '<section class="mobile-transfer-panel">'
+      + '<img class="mobile-transfer-qr" src="' + escapeHtml(transfer.qrDataUrl) + '" alt="スマホからレシート画像を送信するQRコード" />'
+      + '<div class="mobile-transfer-copy"><p class="eyebrow">PHONE UPLOAD</p>'
+      + '<h4>スマホでQRコードを読み取る</h4>'
+      + '<p>同じWi-Fiに接続したスマホで読み取り、撮影した画像を送信してください。</p>'
+      + '<code class="mobile-transfer-url">' + escapeHtml(transfer.url) + '</code>'
+      + '<small>有効期限 ' + escapeHtml(expiresAt) + '・1回限りの受信です。接続できない場合はゲストWi-Fi設定やPCのファイアウォールをご確認ください。</small>'
+      + '<button class="button ghost small" data-action="cancel-mobile-transfer">受信を終了</button></div>'
+      + '</section>';
+  }
+
+  private async startMobileReceiptTransfer(): Promise<void> {
+    if (this.mobileTransferStarting) return;
+    this.mobileTransferStarting = true;
+    this.clearMobileTransferTimer();
+    this.mobileTransfer = null;
+    try {
+      const session = await window.ledgerApi.receipt.startMobileTransfer();
+      const qrDataUrl = await QRCode.toDataURL(session.url, {
+        width: 240,
+        margin: 2,
+        errorCorrectionLevel: "M"
+      });
+      this.mobileTransfer = { ...session, qrDataUrl };
+      this.mobileTransferTimer = window.setTimeout(
+        () => void this.expireMobileReceiptTransfer(),
+        Math.max(0, session.expiresAt - Date.now())
+      );
+      await this.renderCurrent();
+      this.showToast("スマホ用の受信QRコードを表示しました", "info");
+    } catch (error) {
+      await window.ledgerApi.receipt.stopMobileTransfer();
+      this.showToast(this.errorMessage(error), "error");
+    } finally {
+      this.mobileTransferStarting = false;
+    }
+  }
+
+  private async cancelMobileReceiptTransfer(): Promise<void> {
+    this.clearMobileTransferTimer();
+    this.mobileTransfer = null;
+    await window.ledgerApi.receipt.stopMobileTransfer();
+    if (this.activeView === "ocr") await this.renderCurrent();
+  }
+
+  private async expireMobileReceiptTransfer(): Promise<void> {
+    this.mobileTransferTimer = null;
+    this.mobileTransfer = null;
+    await window.ledgerApi.receipt.stopMobileTransfer();
+    if (this.activeView === "ocr") await this.renderCurrent();
+    this.showToast("受信期限が切れました。QRコードを再発行してください。", "info");
+  }
+
+  private clearMobileTransferTimer(): void {
+    if (this.mobileTransferTimer !== null) window.clearTimeout(this.mobileTransferTimer);
+    this.mobileTransferTimer = null;
+  }
+
+  private async receiveMobileReceipt(image: ReceiptImage): Promise<void> {
+    this.clearMobileTransferTimer();
+    this.mobileTransfer = null;
+    this.ocrImage = image;
+    this.ocrResult = null;
+    this.activeView = "ocr";
+    await this.renderCurrent();
+    this.showToast("スマホからレシート画像を受信しました。OCRを実行してください。", "success");
+  }
+
   private ocrResultMarkup(result: OcrResult, suggested?: string): string {
     const amount = result.amountCandidates[0] ?? "";
     return `
@@ -663,6 +976,9 @@ export class HouseholdLedgerApp {
   private async chooseReceipt(): Promise<void> {
     const image = await window.ledgerApi.receipt.chooseImage();
     if (!image) return;
+    this.clearMobileTransferTimer();
+    this.mobileTransfer = null;
+    await window.ledgerApi.receipt.stopMobileTransfer();
     this.ocrImage = image;
     this.ocrResult = null;
     await this.renderCurrent();
@@ -793,11 +1109,16 @@ export class HouseholdLedgerApp {
         <div class="card-heading"><div><p class="eyebrow">BUDGET SETTINGS</p><h3>予算設定</h3><p class="settings-description">カテゴリごとに共通予算を設定します。各月にはカテゴリを指定して追加予算と補足メモを登録できます。</p></div></div>
         <form id="budget-settings-form" class="budget-settings-form">
           <section class="common-category-budget">
-            <div class="budget-section-heading"><div><h4>カテゴリ別共通予算</h4><p>各月の共通予算は、ここで設定した金額の合計です。</p></div><strong>共通予算合計 <span id="common-budget-total">${yen(commonTotal)}</span></strong></div>
-            <div class="category-budget-grid">${this.categories.map((category) => {
-              const amount = categoryAmounts.get(category.id) ?? 0;
-              return `<label class="category-budget-field${category.isActive ? "" : " disabled"}"><span>${escapeHtml(category.name)}${category.isActive ? "" : "（無効）"}</span><div class="input-with-suffix"><input data-budget-amount data-category-common data-category-id="${category.id}" type="text" inputmode="numeric" maxlength="13" autocomplete="off" value="${amount ? formatBudgetInput(amount) : ""}" placeholder="未設定" /><em>円</em></div></label>`;
-            }).join("")}</div>
+            <div class="common-budget-panel">
+              <div class="common-budget-overview">
+                <div class="common-budget-total"><span>共通予算合計</span><strong id="common-budget-total">${yen(commonTotal)}</strong></div>
+                <p>各月の共通予算として、カテゴリ別に設定した金額の合計が適用されます。</p>
+              </div>
+              <div class="category-budget-grid">${this.categories.map((category) => {
+                const amount = categoryAmounts.get(category.id) ?? 0;
+                return `<label class="category-budget-field${category.isActive ? "" : " disabled"}"><span class="category-budget-label"><i class="category-color-dot" aria-hidden="true" style="background-color:${escapeHtml(category.color)}"></i>${escapeHtml(category.name)}${category.isActive ? "" : "（無効）"}</span><div class="input-with-suffix"><input data-budget-amount data-category-common data-category-id="${category.id}" type="text" inputmode="numeric" maxlength="13" autocomplete="off" value="${amount ? formatBudgetInput(amount) : ""}" placeholder="未設定" /><em>円</em></div></label>`;
+              }).join("")}</div>
+            </div>
           </section>
           <section class="monthly-budget-settings">
             <div class="budget-section-heading"><div><h4>月ごとの追加予算</h4><p>追加予算は指定したカテゴリの共通予算に加算され、その月の予算合計にも反映されます。</p></div></div>
@@ -821,10 +1142,14 @@ export class HouseholdLedgerApp {
     const categories = this.categories.map((category) =>
       `<option value="${category.id}"${selected(addition?.categoryId === category.id)}>${escapeHtml(category.name)}${category.isActive ? "" : "（無効）"}</option>`
     ).join("");
+    const selectedCategory = this.categories.find((category) => category.id === addition?.categoryId);
+    const categoryOptions = this.categories.map((category) =>
+      `<button class="category-picker-option" type="button" data-action="select-budget-category" data-category-picker-option data-category-id="${category.id}" aria-pressed="${selectedCategory?.id === category.id}"><i class="category-color-dot" aria-hidden="true" style="background-color:${escapeHtml(category.color)}"></i><span>${escapeHtml(category.name)}${category.isActive ? "" : "（無効）"}</span></button>`
+    ).join("");
     const amount = addition ? formatBudgetInput(addition.amount) : "";
     const memo = addition?.memo ?? "";
     return `<div class="monthly-budget-row">
-      <label class="monthly-budget-category"><span>カテゴリ</span><select class="monthly-budget-category-select" aria-label="${month}月の追加予算カテゴリ"><option value="">選択してください</option>${categories}</select></label>
+      <div class="monthly-budget-category"><span>カテゴリ</span><span class="monthly-budget-select-wrap"><button class="category-picker-trigger" type="button" data-action="toggle-budget-category-picker" aria-label="${month}月の追加予算カテゴリを選択" aria-haspopup="true" aria-expanded="false"><i class="category-color-dot" data-category-picker-selected-dot aria-hidden="true"${selectedCategory ? ` style="background-color:${escapeHtml(selectedCategory.color)}"` : " hidden"}></i><span data-category-picker-label>${selectedCategory ? `${escapeHtml(selectedCategory.name)}${selectedCategory.isActive ? "" : "（無効）"}` : "選択してください"}</span><span class="category-picker-arrow" aria-hidden="true">▾</span></button><select class="monthly-budget-category-select" aria-label="${month}月の追加予算カテゴリ" hidden><option value="">選択してください</option>${categories}</select><div class="category-picker-options" role="group" aria-label="${month}月のカテゴリ選択肢" hidden><button class="category-picker-option" type="button" data-action="select-budget-category" data-category-picker-option data-category-id="" aria-pressed="${!selectedCategory}"><span>選択してください</span></button>${categoryOptions}</div></span></div>
       <label class="monthly-budget-amount"><span>金額</span><div class="input-with-suffix"><input data-budget-amount data-budget-adjustment type="text" inputmode="numeric" maxlength="14" autocomplete="off" value="${amount}" placeholder="0" /><em>円</em></div></label>
       <label class="monthly-budget-memo"><span>補足メモ</span><input class="budget-memo-input" type="text" maxlength="100" value="${escapeHtml(memo)}" placeholder="任意" /></label>
       <button class="icon-button remove-budget-row" type="button" data-action="remove-month-budget-row" aria-label="${month}月の追加予算を削除">削除</button>
@@ -993,13 +1318,18 @@ export class HouseholdLedgerApp {
     if (!category) return;
     const dialog = document.createElement("dialog");
     dialog.className = "modal-dialog small-dialog";
-    dialog.innerHTML = `<div class="dialog-head"><div><p class="eyebrow">CATEGORY</p><h3>カテゴリを編集</h3></div><button class="dialog-close" type="button">×</button></div><form class="dialog-form"><label class="field"><span>カテゴリ名</span><input name="name" value="${escapeHtml(category.name)}" required /></label><label class="field"><span>表示色</span><input name="color" type="color" value="${escapeHtml(category.color)}" /></label><label class="checkbox-field"><input name="isActive" type="checkbox"${checked(category.isActive)} /><span>使用中にする</span></label><div class="form-actions"><button class="button primary" type="submit">保存</button><button class="button ghost dialog-cancel" type="button">キャンセル</button></div></form>`;
+    dialog.innerHTML = `<div class="dialog-head"><div><p class="eyebrow">CATEGORY</p><h3>カテゴリを編集</h3></div><button class="dialog-close" type="button">×</button></div><form class="dialog-form"><label class="field"><span>カテゴリ名</span><input name="name" value="${escapeHtml(category.name)}" required /></label><label class="field"><span>表示色</span><input name="color" type="color" value="${escapeHtml(category.color)}" /></label><label class="checkbox-field"><input name="isActive" type="checkbox"${checked(category.isActive)} /><span>使用中にする</span></label><label class="checkbox-field"><input name="excludeFromWeeklyBudget" type="checkbox"${checked(category.excludeFromWeeklyBudget)} /><span>週計算から省く</span></label><div class="form-actions"><button class="button primary" type="submit">保存</button><button class="button danger-outline dialog-delete" type="button">削除</button><button class="button ghost dialog-cancel" type="button">キャンセル</button></div></form>`;
     document.body.append(dialog);
     const form = dialog.querySelector<HTMLFormElement>("form")!;
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await window.ledgerApi.categories.update(id, { name: (form.elements.namedItem("name") as HTMLInputElement).value, color: (form.elements.namedItem("color") as HTMLInputElement).value, isActive: (form.elements.namedItem("isActive") as HTMLInputElement).checked });
+        await window.ledgerApi.categories.update(id, {
+          name: (form.elements.namedItem("name") as HTMLInputElement).value,
+          color: (form.elements.namedItem("color") as HTMLInputElement).value,
+          isActive: (form.elements.namedItem("isActive") as HTMLInputElement).checked,
+          excludeFromWeeklyBudget: (form.elements.namedItem("excludeFromWeeklyBudget") as HTMLInputElement).checked
+        });
         dialog.close();
         this.showToast("カテゴリを更新しました", "success");
         await this.renderCurrent();
@@ -1009,6 +1339,17 @@ export class HouseholdLedgerApp {
     });
     dialog.querySelector(".dialog-close")?.addEventListener("click", () => dialog.close());
     dialog.querySelector(".dialog-cancel")?.addEventListener("click", () => dialog.close());
+    dialog.querySelector<HTMLButtonElement>(".dialog-delete")?.addEventListener("click", async () => {
+      if (!confirm(`「${category.name}」を完全に削除します。この操作は元に戻せません。\n\n支出記録や予算設定で使用中のカテゴリは削除できません。続けますか？`)) return;
+      try {
+        await window.ledgerApi.categories.delete(id);
+        dialog.close();
+        this.showToast("カテゴリを削除しました", "success");
+        await this.renderCurrent();
+      } catch (error) {
+        this.showToast(this.errorMessage(error), "error");
+      }
+    });
     dialog.addEventListener("close", () => dialog.remove(), { once: true });
     dialog.showModal();
   }

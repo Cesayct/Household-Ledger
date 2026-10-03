@@ -40,6 +40,9 @@ jobs:
       - name: Test OCR
         run: npm run test:ocr
 
+      - name: Test mobile receipt transfer
+        run: npm run test:mobile-receipt-transfer
+
       - name: Build the NSIS installer
         run: npm run dist
 

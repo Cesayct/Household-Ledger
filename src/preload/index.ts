@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { HouseholdLedgerApi } from "../shared/types";
+import type { HouseholdLedgerApi, ReceiptImage } from "../shared/types";
 
 const api: HouseholdLedgerApi = {
   dashboard: (referenceDate) => ipcRenderer.invoke("dashboard:get", referenceDate),
@@ -13,6 +13,7 @@ const api: HouseholdLedgerApi = {
     list: (includeInactive) => ipcRenderer.invoke("categories:list", includeInactive),
     create: (input) => ipcRenderer.invoke("categories:create", input),
     update: (id, input) => ipcRenderer.invoke("categories:update", id, input),
+    delete: (id) => ipcRenderer.invoke("categories:delete", id),
     reorder: (ids) => ipcRenderer.invoke("categories:reorder", ids)
   },
   paymentMethods: {
@@ -33,7 +34,14 @@ const api: HouseholdLedgerApi = {
   },
   receipt: {
     chooseImage: () => ipcRenderer.invoke("receipt:choose-image"),
-    recognize: (dataUrl) => ipcRenderer.invoke("receipt:recognize", dataUrl)
+    recognize: (dataUrl) => ipcRenderer.invoke("receipt:recognize", dataUrl),
+    startMobileTransfer: () => ipcRenderer.invoke("receipt:mobile-transfer:start"),
+    stopMobileTransfer: () => ipcRenderer.invoke("receipt:mobile-transfer:stop"),
+    onMobileImage: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, image: ReceiptImage): void => callback(image);
+      ipcRenderer.on("receipt:mobile-image", listener);
+      return () => ipcRenderer.removeListener("receipt:mobile-image", listener);
+    }
   },
   printing: {
     print: () => ipcRenderer.invoke("printing:print"),

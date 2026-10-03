@@ -5,12 +5,14 @@ import { fileURLToPath } from "node:url";
 import { todayKey } from "../shared/date";
 import type { ExpenseInput } from "../shared/types";
 import { HouseholdDatabase } from "./database";
+import { MobileReceiptTransferServer } from "./mobile-receipt-transfer";
 import { ReceiptOcr } from "./ocr";
 import { startAutoUpdates } from "./updater";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let database: HouseholdDatabase;
 let receiptOcr: ReceiptOcr;
+let receiptTransfer: MobileReceiptTransferServer | null = null;
 
 const mimeTypeFor = (filePath: string): string => {
   switch (extname(filePath).toLowerCase()) {
@@ -71,6 +73,7 @@ const registerIpc = (): void => {
   ipcMain.handle("categories:list", (_event, includeInactive = false) => database.listCategories(includeInactive));
   ipcMain.handle("categories:create", (_event, input) => database.createCategory(input));
   ipcMain.handle("categories:update", (_event, id: number, input) => database.updateCategory(id, input));
+  ipcMain.handle("categories:delete", (_event, id: number) => database.deleteCategory(id));
   ipcMain.handle("categories:reorder", (_event, ids: number[]) => database.reorderCategories(ids));
 
   ipcMain.handle("payment-methods:list", (_event, includeInactive = false) => database.listPaymentMethods(includeInactive));
@@ -166,6 +169,22 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle("receipt:recognize", (_event, dataUrl: string) => receiptOcr.recognize(dataUrl));
+  ipcMain.handle("receipt:mobile-transfer:start", async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) throw new Error("画像を受信するウィンドウが見つかりません。");
+    await receiptTransfer?.stop();
+    const transfer = new MobileReceiptTransferServer();
+    receiptTransfer = transfer;
+    return transfer.start((image) => {
+      if (!window.isDestroyed()) window.webContents.send("receipt:mobile-image", image);
+      if (receiptTransfer === transfer) receiptTransfer = null;
+    });
+  });
+  ipcMain.handle("receipt:mobile-transfer:stop", async () => {
+    const transfer = receiptTransfer;
+    receiptTransfer = null;
+    await transfer?.stop();
+  });
 };
 
 app.setAppUserModelId("jp.local.householdledger");
@@ -183,5 +202,14 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+  const transfer = receiptTransfer;
+  receiptTransfer = null;
+  void transfer?.stop();
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  const transfer = receiptTransfer;
+  receiptTransfer = null;
+  void transfer?.stop();
 });
