@@ -13,10 +13,41 @@ export type PaymentMethod = {
   isActive: boolean;
 };
 
+export type CategoryBudgetSetting = {
+  categoryId: number;
+  amount: number | null;
+};
+
+export type MonthlyBudgetAddition = {
+  id: number;
+  categoryId: number;
+  categoryName: string;
+  amount: number;
+  memo: string;
+};
+
+export type MonthlyBudgetAdditionInput = {
+  categoryId: number;
+  amount: number;
+  memo: string;
+};
+
 export type MonthlyBudget = {
   month: number;
-  amount: number | null;
-  memo: string;
+  additions: MonthlyBudgetAddition[];
+};
+
+export type BudgetSettings = {
+  categoryBudgets: CategoryBudgetSetting[];
+  monthlyBudgets: MonthlyBudget[];
+};
+
+export type BudgetSettingsInput = {
+  categoryBudgets: CategoryBudgetSetting[];
+  monthlyBudgets: Array<{
+    month: number;
+    additions: MonthlyBudgetAdditionInput[];
+  }>;
 };
 
 export type Expense = {
@@ -125,9 +156,8 @@ export type RestoreResult = {
   budgets: number;
 };
 
-export type BackupSnapshot = {
+type BackupSnapshotBase = {
   format: "household-ledger-backup";
-  version: 1;
   exportedAt: string;
   categories: Array<{
     id: number;
@@ -142,12 +172,6 @@ export type BackupSnapshot = {
     sortOrder: number;
     isActive: boolean;
   }>;
-  monthlyBudgets?: Array<{
-    month: number;
-    amount: number | null;
-    memo?: string;
-  }>;
-  commonBudget?: number | null;
   expenses: Array<{
     id: number;
     spentDate: string;
@@ -162,6 +186,30 @@ export type BackupSnapshot = {
     createdAt: string;
     updatedAt: string;
   }>;
+};
+
+export type BackupSnapshot = BackupSnapshotBase & {
+  version: 2;
+  categoryBudgets: Array<{
+    categoryId: number;
+    amount: number;
+  }>;
+  monthlyBudgetAdditions: Array<{
+    month: number;
+    categoryId: number;
+    amount: number;
+    memo: string;
+  }>;
+};
+
+export type LegacyBackupSnapshot = BackupSnapshotBase & {
+  version: 1;
+  monthlyBudgets?: Array<{
+    month: number;
+    amount: number | null;
+    memo?: string;
+  }>;
+  commonBudget?: number | null;
 };
 
 export type HouseholdLedgerApi = {
@@ -184,10 +232,8 @@ export type HouseholdLedgerApi = {
     update: (id: number, input: { name: string; isActive: boolean }) => Promise<PaymentMethod>;
   };
   budgets: {
-    list: () => Promise<MonthlyBudget[]>;
-    update: (month: number, amount: number | null, memo?: string) => Promise<MonthlyBudget>;
-    common: () => Promise<number | null>;
-    updateCommon: (amount: number | null) => Promise<number | null>;
+    settings: () => Promise<BudgetSettings>;
+    saveSettings: (settings: BudgetSettingsInput) => Promise<void>;
   };
   week: (weekStart: string) => Promise<WeekView>;
   month: (month: string) => Promise<MonthView>;

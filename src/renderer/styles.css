@@ -220,11 +220,39 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .settings-card { padding: 23px 25px 11px; }
 .budget-settings-card { margin-bottom: 20px; padding: 23px 25px 20px; }
 .settings-description { margin: 7px 0 0 !important; color: #9aa3b4; font-size: 11px !important; }
-.budget-settings-form { display: grid; gap: 17px; }
-.common-budget-row { display: flex; align-items: flex-end; gap: 14px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 9px; background: #fafbfe; }
-.common-budget-row .budget-field { width: min(100%, 260px); }
-.common-budget-row > small { padding-bottom: 12px; color: #8d97aa; font-size: 10px; }
-.budget-input-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.budget-settings-form { display: grid; gap: 20px; }
+.common-category-budget, .monthly-budget-settings { display: grid; gap: 13px; }
+.budget-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.budget-section-heading h4 { margin: 0; color: var(--navy); font-size: 13px; }
+.budget-section-heading p { margin: 5px 0 0; color: #8994a8; font-size: 10px; }
+.budget-section-heading > strong { color: #66728b; font-size: 11px; white-space: nowrap; }
+.budget-section-heading > strong span { margin-left: 5px; color: var(--navy); font-size: 14px; }
+.category-budget-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fafbfe; }
+.category-budget-field { display: grid; gap: 6px; color: #58647b; font-size: 10px; font-weight: 650; }
+.category-budget-field.disabled { opacity: .6; }
+.category-budget-field .input-with-suffix { position: relative; }
+.category-budget-field input, .monthly-budget-row input, .monthly-budget-row select { width: 100%; min-width: 0; min-height: 38px; padding: 8px 31px 8px 10px; border: 1px solid #e0e4ed; border-radius: 7px; outline: 0; color: var(--navy); background: #fff; font-size: 11px; }
+.category-budget-field input:focus, .monthly-budget-row input:focus, .monthly-budget-row select:focus { border-color: #8597f6; box-shadow: 0 0 0 3px rgba(67,97,238,.1); }
+.category-budget-field .input-with-suffix em, .monthly-budget-amount .input-with-suffix em { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); color: #8e99ac; font-size: 10px; font-style: normal; pointer-events: none; }
+.monthly-budget-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.month-budget-card { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.month-budget-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.month-budget-heading > div { display: flex; align-items: baseline; gap: 9px; }
+.month-budget-heading h4 { margin: 0; color: var(--navy); font-size: 14px; }
+.month-budget-heading span { color: #8d97aa; font-size: 9px; }
+.month-budget-heading span strong { color: #65718a; font-size: 10px; }
+.small-button { min-height: 31px; padding: 6px 9px; font-size: 9px; }
+.month-budget-summary { display: flex; align-items: baseline; gap: 6px; margin: 11px 0; padding: 8px 9px; border-radius: 6px; background: #f6f7fb; color: #8791a4; font-size: 9px; }
+.month-budget-summary strong { margin-right: auto; color: #4e5c78; font-size: 11px; }
+.month-budget-summary strong:last-child { margin-right: 0; color: var(--primary); }
+.monthly-budget-rows { display: grid; gap: 8px; }
+.monthly-budget-row { display: grid; grid-template-columns: 1.1fr .85fr 1.2fr auto; align-items: end; gap: 7px; }
+.monthly-budget-row label { display: grid; min-width: 0; gap: 5px; color: #778298; font-size: 9px; }
+.monthly-budget-row .monthly-budget-amount .input-with-suffix { position: relative; }
+.monthly-budget-row .monthly-budget-amount input { text-align: right; }
+.monthly-budget-row .monthly-budget-memo input { padding-right: 9px; }
+.monthly-budget-row select { padding: 7px 8px; }
+.remove-budget-row { min-height: 36px; padding: 0 8px; color: #b05b62; font-size: 9px; }
 .budget-field { display: grid; gap: 7px; color: #58647b; font-size: 11px; font-weight: 650; }
 .budget-field input { width: 100%; min-height: 40px; padding: 9px 35px 9px 11px; border: 1px solid #e0e4ed; border-radius: 7px; outline: 0; color: var(--navy); background: #fff; font-size: 12px; font-weight: 400; }
 .budget-field .budget-memo-input { padding-right: 11px; font-size: 11px; }
@@ -342,14 +370,17 @@ button:disabled { cursor: not-allowed; opacity: .38; }
   .content, .topbar { padding-left: 32px; padding-right: 32px; }
   .week-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .week-grid .day-card { min-height: 220px; }
-  .budget-input-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .category-budget-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 760px) {
-  .budget-input-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .common-budget-row { align-items: flex-start; flex-direction: column; }
-  .common-budget-row .budget-field { width: 100%; }
-  .common-budget-row > small { padding-bottom: 0; }
+  .category-budget-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .monthly-budget-grid { grid-template-columns: 1fr; }
+  .monthly-budget-row { grid-template-columns: 1fr 1fr auto; }
+  .monthly-budget-row .monthly-budget-memo { grid-column: 1 / 3; }
+  .monthly-budget-row .remove-budget-row { grid-column: 3; grid-row: 1 / 3; }
+  .budget-section-heading { flex-direction: column; }
+  .budget-form-footer { align-items: flex-start; flex-direction: column; }
 }
 
 @media print {

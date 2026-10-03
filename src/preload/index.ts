@@ -21,10 +21,8 @@ const api: HouseholdLedgerApi = {
     update: (id, input) => ipcRenderer.invoke("payment-methods:update", id, input)
   },
   budgets: {
-    list: () => ipcRenderer.invoke("budgets:list"),
-    update: (month, amount, memo) => ipcRenderer.invoke("budgets:update", month, amount, memo),
-    common: () => ipcRenderer.invoke("budgets:common"),
-    updateCommon: (amount) => ipcRenderer.invoke("budgets:update-common", amount)
+    settings: () => ipcRenderer.invoke("budgets:settings"),
+    saveSettings: (settings) => ipcRenderer.invoke("budgets:save-settings", settings)
   },
   week: (weekStart) => ipcRenderer.invoke("week:get", weekStart),
   month: (month) => ipcRenderer.invoke("month:get", month),

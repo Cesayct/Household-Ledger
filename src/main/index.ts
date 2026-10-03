@@ -60,10 +60,8 @@ const registerIpc = (): void => {
   ipcMain.handle("dashboard:get", (_event, referenceDate: string) => database.getDashboard(referenceDate));
   ipcMain.handle("week:get", (_event, weekStart: string) => database.getWeek(weekStart));
   ipcMain.handle("month:get", (_event, month: string) => database.getMonth(month));
-  ipcMain.handle("budgets:list", () => database.listMonthlyBudgets());
-  ipcMain.handle("budgets:update", (_event, month: number, amount: number | null, memo?: string) => database.updateMonthlyBudget(month, amount, memo));
-  ipcMain.handle("budgets:common", () => database.getCommonBudget());
-  ipcMain.handle("budgets:update-common", (_event, amount: number | null) => database.updateCommonBudget(amount));
+  ipcMain.handle("budgets:settings", () => database.getBudgetSettings());
+  ipcMain.handle("budgets:save-settings", (_event, settings) => database.saveBudgetSettings(settings));
 
   ipcMain.handle("expenses:list", (_event, filters) => database.listExpenses(filters ?? {}));
   ipcMain.handle("expenses:create", (_event, input: ExpenseInput) => database.createExpense(input));
